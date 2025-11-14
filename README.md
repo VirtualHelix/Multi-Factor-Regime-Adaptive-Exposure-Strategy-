@@ -34,6 +34,7 @@ To run the Adaptive Exposure Model, you must provide a CSV file with the followi
 - VIX
 - LT_Score
 - ST_Score
+- Or you can use the sample data provided under QQQ_base.xlsx
 
 Save your file in this directory as:
 
