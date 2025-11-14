@@ -1,101 +1,149 @@
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
+import warnings
 
-from src.adaptive_exposure import compute_exposure, run_backtest
+warnings.filterwarnings("ignore", category=FutureWarning)
+pd.options.mode.chained_assignment = None
 
 
-# =========================================================
-# Load Data
-# =========================================================
-def load_data(path):
-    df = pd.read_csv(path)
-    required_cols = [
-        "QQQ_close",
-        "QQQ_today_close_to_tmrw_close_return",
-        "VIX",
-        "LT_Score",
-        "ST_Score",
-    ]
+# ---------------------------------------------------------
+# Fast rolling standard deviation using cumulative sums
+# ---------------------------------------------------------
+def fast_rolling_std(a, window):
+    """
+    Efficient rolling standard deviation using cumulative sums.
+    Returns an array the same length as the input.
+    """
+    cumsum = np.cumsum(np.insert(a, 0, 0))
+    cumsum2 = np.cumsum(np.insert(a**2, 0, 0))
 
-    for col in required_cols:
-        if col not in df.columns:
-            raise ValueError(f"Missing required column: {col}")
+    # rolling statistics
+    mean = (cumsum[window:] - cumsum[:-window]) / window
+    mean2 = (cumsum2[window:] - cumsum2[:-window]) / window
+
+    std = np.sqrt(np.maximum(mean2 - mean**2, 0))
+
+    # pad start of series
+    pad = np.full(window - 1, std[0])
+    return np.concatenate([pad, std])
+
+
+# ---------------------------------------------------------
+# Adaptive Exposure Model
+# ---------------------------------------------------------
+def compute_exposure(df):
+    """
+    Compute adaptive model-based exposure using long-term and short-term
+    features, volatility normalization, VIX throttling, and smoothing.
+    """
+
+    close = df["QQQ_close"].values
+    vix = df["VIX"].values
+    lt = df["LT_Score"].values
+    st = df["ST_Score"].values
+
+    # ----------------------------------------
+    # Daily returns
+    # ----------------------------------------
+    ret = np.zeros_like(close, dtype=float)
+    ret[1:] = (close[1:] / close[:-1]) - 1
+    df["ret"] = ret
+
+    # ----------------------------------------
+    # Realized volatility (20-day)
+    # ----------------------------------------
+    vol20 = fast_rolling_std(ret, 20) * np.sqrt(252)
+    df["realized_vol_20"] = np.where(np.isnan(vol20), np.nanmedian(vol20), vol20)
+
+    # ----------------------------------------
+    # Normalize features
+    # ----------------------------------------
+    LT_norm = lt / np.nanmax(lt)
+    ST_norm = st / np.nanmax(st)
+
+    rolling_median_vol = (
+        pd.Series(df["realized_vol_20"])
+        .rolling(250, min_periods=20)
+        .median()
+        .fillna(method="bfill")
+    )
+
+    vol_norm = df["realized_vol_20"] / rolling_median_vol
+    vol_norm = vol_norm.fillna(1.0).values
+
+    # ----------------------------------------
+    # Core exposure logic
+    # ----------------------------------------
+    vol_weight = 1 / np.sqrt(np.maximum(vol_norm, 0.5))
+    momentum = 1.8 * LT_norm + 1.3 * ST_norm
+    risk_adj = momentum * vol_weight
+
+    # nonlinear activation
+    exp = 2.5 * np.tanh(risk_adj - 0.5)
+
+    # ----------------------------------------
+    # VIX-based risk throttling
+    # ----------------------------------------
+    exp *= np.where(vix < 15, 1.2, 1.0)  # boost when calm
+    exp *= np.where(vix > 25, 0.6, 1.0)  # throttle when fearful
+
+    # ----------------------------------------
+    # Mean-reversion dampener
+    # ----------------------------------------
+    roll_cum = pd.Series(ret).rolling(10, min_periods=3).sum().fillna(0)
+    exp *= np.where(roll_cum > 0.04, 0.8, 1.0)  # reduce size after run-ups
+
+    # ----------------------------------------
+    # Final smoothing
+    # ----------------------------------------
+    kernel = np.ones(7) / 7
+    exp = np.convolve(exp, kernel, mode="same")
+
+    # ----------------------------------------
+    # Clip exposure
+    # ----------------------------------------
+    df["exposure"] = np.clip(exp, -1.0, 2.0)
 
     return df
 
 
-# =========================================================
-# Performance Metrics
-# =========================================================
-def calc_perf(equity):
+# ---------------------------------------------------------
+# Backtest helper
+# ---------------------------------------------------------
+def run_backtest(df):
+    """
+    Computes strategy returns and cumulative equity curve.
+    """
+
+    df["strategy_ret"] = df["exposure"].shift(1) * df["QQQ_today_close_to_tmrw_close_return"]
+    df["cum_equity"] = (1 + df["strategy_ret"]).cumprod()
+    df["bh_equity"] = (1 + df["QQQ_today_close_to_tmrw_close_return"]).cumprod()
+
+    return df
+
+
+# ---------------------------------------------------------
+# Optional: Simple performance stats
+# ---------------------------------------------------------
+def performance_summary(equity):
+    """
+    Returns total return, CAGR, drawdown, Sharpe, Calmar.
+    """
     total_return = equity.iloc[-1] - 1
     cagr = equity.iloc[-1] ** (252 / len(equity)) - 1
 
     dd = (equity / equity.cummax()) - 1
     max_dd = abs(dd.min())
 
-    calmar = cagr / max_dd if max_dd > 0 else float("nan")
-
     daily = equity.pct_change().fillna(0)
-    sharpe = (daily.mean() / (daily.std() + 1e-9)) * 252**0.5
+    sharpe = (daily.mean() / (daily.std() + 1e-9)) * np.sqrt(252)
+
+    calmar = cagr / max_dd if max_dd > 0 else np.nan
 
     return {
         "total_return": total_return,
         "cagr": cagr,
-        "max_dd": max_dd,
-        "calmar": calmar,
+        "max_drawdown": max_dd,
         "sharpe": sharpe,
+        "calmar": calmar,
     }
-
-
-# =========================================================
-# Main Entry Point
-# =========================================================
-def main():
-    data_path = "data/qqq_features.csv"   # <-- You can rename this file as needed
-
-    print("Loading data...")
-    df = load_data(data_path)
-
-    print("Computing exposure...")
-    df = compute_exposure(df)
-
-    print("Running backtest...")
-    df = run_backtest(df)
-
-    # -------------------------
-    # Compute Performance
-    # -------------------------
-    strat = calc_perf(df["cum_equity"])
-    bh = calc_perf(df["bh_equity"])
-
-    print("\n=== Adaptive Exposure Strategy ===")
-    print(f"Total Return: {strat['total_return']:.2%}")
-    print(f"CAGR:         {strat['cagr']:.2%}")
-    print(f"Max Drawdown: {strat['max_dd']:.2%}")
-    print(f"Calmar:       {strat['calmar']:.2f}")
-    print(f"Sharpe:       {strat['sharpe']:.2f}")
-
-    print("\n=== Buy & Hold (QQQ) ===")
-    print(f"Total Return: {bh['total_return']:.2%}")
-    print(f"CAGR:         {bh['cagr']:.2%}")
-    print(f"Max Drawdown: {bh['max_dd']:.2%}")
-    print(f"Calmar:       {bh['calmar']:.2f}")
-    print(f"Sharpe:       {bh['sharpe']:.2f}")
-
-    # -------------------------
-    # Plot Results
-    # -------------------------
-    plt.figure(figsize=(12, 6))
-    plt.plot(df["cum_equity"], label="Adaptive Strategy", color="blue")
-    plt.plot(df["bh_equity"], label="Buy & Hold QQQ", linestyle="--", color="orange")
-
-    plt.title("Adaptive Financial Exposure Model vs Buy & Hold")
-    plt.ylabel("Equity (Growth of $1)")
-    plt.grid(True, linestyle="--", alpha=0.6)
-    plt.legend()
-    plt.show()
-
-
-if __name__ == "__main__":
-    main()
