@@ -1,0 +1,73 @@
+# ====================================
+# Python
+# ====================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.pkl
+*.egg-info/
+*.egg
+.env
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+pytest_cache/
+
+# ====================================
+# Jupyter / Colab
+# ====================================
+.ipynb_checkpoints/
+*.ipynb
+
+# ====================================
+# Data Files (large or proprietary)
+# ====================================
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.h5
+*.feather
+*.zip
+data/
+datasets/
+raw_data/
+processed_data/
+
+# ====================================
+# Logs / Artifacts
+# ====================================
+*.log
+*.out
+*.tmp
+*.bak
+
+# ====================================
+# OS / Editor Files
+# ====================================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ====================================
+# Plots / Output Images
+# ====================================
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# ====================================
+# Environment / Secrets
+# ====================================
+.env
+*.key
+*.token
+credentials/
+secrets/
